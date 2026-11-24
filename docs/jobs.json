@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-11-24T06:28:57.525404+00:00",
+  "updatedAt": "2026-11-24T06:52:34.257577+00:00",
   "total": 103,
   "jobs": [
     {
@@ -2165,5 +2165,6 @@
       "status": "Open",
       "url": "https://new.my.msd.govt.nz/en/jobs/vacancy/30070041"
     }
-  ]
+  ],
+  "excelFile": "waikato_jobs_2026-11-24_19-52_NZT.xlsx"
 }

@@ -101,7 +101,7 @@
         <h1>Waikato Region — Active MyMSD Jobs</h1>
         <div class="meta" id="meta">Loading latest vacancies…</div>
       </div>
-      <a class="btn" href="waikato_jobs.xlsx" download>⬇ Download Excel (.xlsx)</a>
+      <a class="btn" id="download-btn" href="waikato_jobs.xlsx" download>⬇ Download Excel (.xlsx)</a>
     </header>
 
     <div class="controls">
@@ -180,6 +180,12 @@
         const updated = data.updatedAt ? new Date(data.updatedAt).toLocaleString() : "Unknown";
         document.getElementById("meta").textContent =
           `${allJobs.length} active vacancies · Last updated: ${updated}`;
+        if (data.excelFile) {
+          const btn = document.getElementById("download-btn");
+          btn.href = data.excelFile;
+          btn.setAttribute("download", data.excelFile);
+          btn.title = data.excelFile;
+        }
 
         const districts = [...new Set(
           allJobs.flatMap(j => (j.districts || "").split(",").map(s => s.trim()).filter(Boolean))
