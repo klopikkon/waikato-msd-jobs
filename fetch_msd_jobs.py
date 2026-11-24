@@ -19,10 +19,11 @@ import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -339,14 +340,24 @@ def export_to_excel(
     wb.save(output_path)
 
 
-def export_to_json(jobs: list[dict[str, Any]], output_path: Path) -> None:
+def now_nz() -> datetime:
+    """Return current New Zealand time (falls back to UTC+13 if tzdata is missing)."""
+    try:
+        return datetime.now(ZoneInfo("Pacific/Auckland"))
+    except ZoneInfoNotFoundError:
+        return datetime.now(timezone(timedelta(hours=13)))
+
+
+def export_to_json(jobs: list[dict[str, Any]], output_path: Path, excel_filename: str = "") -> None:
     """Write normalized jobs (without bulky descriptions) and timestamp to JSON for the web UI."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "total": len(jobs),
         "jobs": jobs,
     }
+    if excel_filename:
+        payload["excelFile"] = excel_filename
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -407,10 +418,17 @@ def main() -> None:
     print(f"Fetched {fetched_count}/{len(jobs)} position descriptions.")
 
     if args.docs:
-        excel_path = Path("docs/waikato_jobs.xlsx").resolve()
-        json_path = Path("docs/jobs.json").resolve()
+        docs_dir = Path("docs").resolve()
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        for old_xlsx in docs_dir.glob("waikato_jobs*.xlsx"):
+            old_xlsx.unlink()
+
+        stamp = now_nz().strftime("%Y-%m-%d_%H-%M_NZT")
+        excel_filename = f"waikato_jobs_{stamp}.xlsx"
+        excel_path = docs_dir / excel_filename
+        json_path = docs_dir / "jobs.json"
         export_to_excel(jobs, descriptions, excel_path)
-        export_to_json(jobs, json_path)
+        export_to_json(jobs, json_path, excel_filename=excel_filename)
         print(f"Saved Excel file to: {excel_path}")
         print(f"Saved JSON file to: {json_path}")
     else:
