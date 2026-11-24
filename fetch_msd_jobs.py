@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import json
+import re
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +29,57 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 API_URL = "https://new.my.msd.govt.nz/bin/sep/vacancies/search"
+DETAILS_API_URL = "https://new.my.msd.govt.nz/bin/sep/vacancies/details"
 DEFAULT_SEARCH_URL = (
     "https://new.my.msd.govt.nz/en/jobs/search"
     "?l=W3siZGVzYyI6WyJXYWlrYXRvJTIwUmVnaW9uIiwiTm9ydGglMjBJc2xhbmQiXSwicmVnaW9uIjp0cnVlfV0%3D"
 )
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+class _HTMLToText(HTMLParser):
+    """Convert MyMSD HTML vacancy descriptions into clean, Excel-friendly plain text."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag == "li":
+            self._parts.append("\n• ")
+        elif tag == "br":
+            self._parts.append("\n")
+        elif tag in ("p", "div", "h1", "h2", "h3", "h4"):
+            if self._parts and not self._parts[-1].endswith("\n"):
+                self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in ("p", "div", "ul", "ol", "h1", "h2", "h3", "h4"):
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self._parts.append(data)
+
+    def get_text(self) -> str:
+        raw = html.unescape("".join(self._parts))
+        # Collapse excessive blank lines and trailing spaces per line
+        lines = [line.strip() for line in raw.splitlines()]
+        cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+        # Excel cells cap at 32,767 characters
+        return cleaned[:32000]
+
+
+def html_to_plain_text(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+    parser = _HTMLToText()
+    parser.feed(raw_html)
+    parser.close()
+    return parser.get_text()
 
 
 def payload_from_search_url(url: str) -> dict[str, Any]:
@@ -92,7 +143,7 @@ def fetch_vacancies(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "Origin": "https://new.my.msd.govt.nz",
             "Referer": "https://new.my.msd.govt.nz/en/jobs/search",
             "x-transaction-id": str(uuid.uuid4()),
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "User-Agent": USER_AGENT,
         },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -100,6 +151,42 @@ def fetch_vacancies(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
     results = body.get("results") or {}
     return results.get("suitableVacancies") or []
+
+
+def fetch_vacancy_description(vacancy_id: str) -> str:
+    """GET individual vacancy details and return the plain-text position description."""
+    if not vacancy_id:
+        return ""
+    url = f"{DETAILS_API_URL}?vacancyId={urllib.parse.quote(vacancy_id)}"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "Accept": "application/json",
+            "Origin": "https://new.my.msd.govt.nz",
+            "Referer": f"https://new.my.msd.govt.nz/en/jobs/vacancy/{vacancy_id}",
+            "x-transaction-id": str(uuid.uuid4()),
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        details = (body.get("results") or {}).get("vacancyDetails") or {}
+        return html_to_plain_text(details.get("vacancyDescription") or "")
+    except Exception:
+        return ""
+
+
+def fetch_all_descriptions(vacancy_ids: list[str], max_workers: int = 5) -> dict[str, str]:
+    """Fetch position descriptions for all vacancy IDs with polite concurrency."""
+    descriptions: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(fetch_vacancy_description, vid): vid for vid in vacancy_ids if vid}
+        for future in as_completed(futures):
+            vid = futures[future]
+            descriptions[vid] = future.result()
+    return descriptions
 
 
 def format_pay(job: dict[str, Any]) -> str:
@@ -152,15 +239,20 @@ def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def export_to_excel(jobs: list[dict[str, Any]], output_path: Path) -> None:
-    """Write normalized jobs to a formatted Excel workbook."""
+def export_to_excel(
+    jobs: list[dict[str, Any]],
+    descriptions: dict[str, str],
+    output_path: Path,
+) -> None:
+    """Write normalized jobs (including Job ID and Position Description) to Excel."""
     wb = Workbook()
     ws = wb.active
     ws.title = "MyMSD Jobs"
 
     headers = [
-        "Vacancy ID",
+        "Job ID",
         "Title",
+        "Position Description",
         "Category",
         "Occupation",
         "Industry",
@@ -191,11 +283,15 @@ def export_to_excel(jobs: list[dict[str, Any]], output_path: Path) -> None:
         cell.alignment = Alignment(horizontal="left", vertical="center")
 
     link_font = Font(color="0563C1", underline="single")
+    top_align = Alignment(vertical="top")
+    wrap_align = Alignment(vertical="top", wrap_text=True)
 
     for row_idx, job in enumerate(jobs, start=2):
+        desc = descriptions.get(job["vacancyId"], "")
         row = [
             job["vacancyId"],
             job["title"],
+            desc,
             job["category"],
             job["occupation"],
             job["industry"],
@@ -216,6 +312,10 @@ def export_to_excel(jobs: list[dict[str, Any]], output_path: Path) -> None:
         ]
         ws.append(row)
 
+        for col_idx in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.alignment = wrap_align if col_idx == 3 else top_align
+
         if job["url"]:
             url_cell = ws.cell(row=row_idx, column=len(headers))
             url_cell.hyperlink = job["url"]
@@ -226,6 +326,9 @@ def export_to_excel(jobs: list[dict[str, Any]], output_path: Path) -> None:
 
     for col_idx in range(1, len(headers) + 1):
         col_letter = get_column_letter(col_idx)
+        if col_idx == 3:  # Position Description column
+            ws.column_dimensions[col_letter].width = 65
+            continue
         max_len = max(
             len(str(ws.cell(row=r, column=col_idx).value or ""))
             for r in range(1, len(jobs) + 2)
@@ -237,7 +340,7 @@ def export_to_excel(jobs: list[dict[str, Any]], output_path: Path) -> None:
 
 
 def export_to_json(jobs: list[dict[str, Any]], output_path: Path) -> None:
-    """Write normalized jobs and update timestamp to JSON for the web UI."""
+    """Write normalized jobs (without bulky descriptions) and timestamp to JSON for the web UI."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
@@ -298,16 +401,21 @@ def main() -> None:
     jobs = [normalize_job(j) for j in raw_vacancies]
     print(f"Fetched {len(jobs)} active vacancies.")
 
+    print("Fetching position descriptions for Excel export...")
+    descriptions = fetch_all_descriptions([j["vacancyId"] for j in jobs])
+    fetched_count = sum(1 for v in descriptions.values() if v)
+    print(f"Fetched {fetched_count}/{len(jobs)} position descriptions.")
+
     if args.docs:
         excel_path = Path("docs/waikato_jobs.xlsx").resolve()
         json_path = Path("docs/jobs.json").resolve()
-        export_to_excel(jobs, excel_path)
+        export_to_excel(jobs, descriptions, excel_path)
         export_to_json(jobs, json_path)
         print(f"Saved Excel file to: {excel_path}")
         print(f"Saved JSON file to: {json_path}")
     else:
         excel_path = Path(args.output).resolve()
-        export_to_excel(jobs, excel_path)
+        export_to_excel(jobs, descriptions, excel_path)
         print(f"Saved Excel file to: {excel_path}")
         if args.json_output:
             json_path = Path(args.json_output).resolve()
