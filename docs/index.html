@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Waikato Active Jobs — MyMSD</title>
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --card: #ffffff;
+      --primary: #1f4e78;
+      --primary-hover: #163a5a;
+      --text: #1e293b;
+      --muted: #64748b;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    h1 { margin: 0; font-size: 1.6rem; color: var(--primary); }
+    .meta { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--primary);
+      color: #fff;
+      text-decoration: none;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    input, select {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.95rem;
+      background: var(--card);
+    }
+    input { flex: 1; min-width: 240px; }
+    .table-wrap {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow-x: auto;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    th, td {
+      text-align: left;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      background: #f8fafc;
+      font-weight: 600;
+      color: var(--primary);
+      position: sticky;
+      top: 0;
+    }
+    tr:hover td { background: #f8fafc; }
+    a.job-link { color: #0563c1; text-decoration: none; font-weight: 600; }
+    a.job-link:hover { text-decoration: underline; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #e0ecf7;
+      color: var(--primary);
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    .empty { text-align: center; padding: 32px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Waikato Region — Active MyMSD Jobs</h1>
+        <div class="meta" id="meta">Loading latest vacancies…</div>
+      </div>
+      <a class="btn" href="waikato_jobs.xlsx" download>⬇ Download Excel (.xlsx)</a>
+    </header>
+
+    <div class="controls">
+      <input type="search" id="search" placeholder="Search by title, suburb, category, or pay…" />
+      <select id="district"><option value="">All Districts</option></select>
+      <select id="hours">
+        <option value="">Full-time & Part-time</option>
+        <option value="Full-time">Full-time</option>
+        <option value="Part-time">Part-time</option>
+      </select>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>District / Suburb</th>
+            <th>Category</th>
+            <th>Type / Hours</th>
+            <th>Pay</th>
+            <th>Start Date</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    let allJobs = [];
+
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
+    function render() {
+      const q = document.getElementById("search").value.trim().toLowerCase();
+      const dist = document.getElementById("district").value;
+      const hrs = document.getElementById("hours").value;
+
+      const filtered = allJobs.filter(j => {
+        if (dist && !j.districts.includes(dist)) return false;
+        if (hrs && j.hours !== hrs) return false;
+        if (!q) return true;
+        return [j.title, j.category, j.districts, j.suburbs, j.pay, j.contractType]
+          .join(" ").toLowerCase().includes(q);
+      });
+
+      const tbody = document.getElementById("tbody");
+      if (!filtered.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No matching jobs found.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = filtered.map(j => `
+        <tr>
+          <td><a class="job-link" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a></td>
+          <td>${esc(j.suburbs ? `${j.suburbs} (${j.districts})` : j.districts)}</td>
+          <td>${esc(j.category)}</td>
+          <td><span class="badge">${esc(j.contractType)}</span> ${esc(j.hours)}</td>
+          <td>${esc(j.pay)}</td>
+          <td>${esc(j.startDate)}</td>
+        </tr>
+      `).join("");
+    }
+
+    fetch("jobs.json")
+      .then(r => r.json())
+      .then(data => {
+        allJobs = data.jobs || [];
+        const updated = data.updatedAt ? new Date(data.updatedAt).toLocaleString() : "Unknown";
+        document.getElementById("meta").textContent =
+          `${allJobs.length} active vacancies · Last updated: ${updated}`;
+
+        const districts = [...new Set(
+          allJobs.flatMap(j => (j.districts || "").split(",").map(s => s.trim()).filter(Boolean))
+        )].sort();
+        const sel = document.getElementById("district");
+        districts.forEach(d => {
+          const opt = document.createElement("option");
+          opt.value = d;
+          opt.textContent = d;
+          sel.appendChild(opt);
+        });
+
+        render();
+      })
+      .catch(() => {
+        document.getElementById("meta").textContent = "Failed to load jobs.json";
+      });
+
+    ["search", "district", "hours"].forEach(id =>
+      document.getElementById(id).addEventListener("input", render)
+    );
+  </script>
+</body>
+</html>
